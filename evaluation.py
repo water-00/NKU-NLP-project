@@ -26,7 +26,7 @@ from datasets import load_multitask_data, load_multitask_test_data, \
     SentencePairDataset, SentencePairTestDataset
 
 
-TQDM_DISABLE = True
+TQDM_DISABLE=False
 
 # Evaluate a multitask model for accuracy.on SST only.
 def model_eval_sst(dataloader, model, device):
@@ -142,8 +142,8 @@ def model_eval_multitask(sentiment_dataloader,
 
         sentiment_accuracy = np.mean(np.array(sst_y_pred) == np.array(sst_y_true))
 
-        print(f'Paraphrase detection accuracy: {paraphrase_accuracy:.3f}')
         print(f'Sentiment classification accuracy: {sentiment_accuracy:.3f}')
+        print(f'Paraphrase detection accuracy: {paraphrase_accuracy:.3f}')
         print(f'Semantic Textual Similarity correlation: {sts_corr:.3f}')
 
         return (paraphrase_accuracy, para_y_pred, para_sent_ids,
@@ -270,7 +270,7 @@ def test_model_multitask(args, model, device):
                                           sts_test_dataloader, model, device)
 
         with open(args.sst_dev_out, "w+") as f:
-            print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
+            print(f"dev sentiment acc : {dev_sentiment_accuracy :.3f}")
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
                 f.write(f"{p} , {s} \n")
@@ -281,7 +281,7 @@ def test_model_multitask(args, model, device):
                 f.write(f"{p} , {s} \n")
 
         with open(args.para_dev_out, "w+") as f:
-            print(f"dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
+            print(f"dev paraphrase acc : {dev_paraphrase_accuracy :.3f}")
             f.write(f"id \t Predicted_Is_Paraphrase \n")
             for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
                 f.write(f"{p} , {s} \n")
@@ -292,7 +292,7 @@ def test_model_multitask(args, model, device):
                 f.write(f"{p} , {s} \n")
 
         with open(args.sts_dev_out, "w+") as f:
-            print(f"dev sts corr :: {dev_sts_corr :.3f}")
+            print(f"dev sts corr : {dev_sts_corr :.3f}")
             f.write(f"id \t Predicted_Similiary \n")
             for p, s in zip(dev_sts_sent_ids, dev_sts_y_pred):
                 f.write(f"{p} , {s} \n")
