@@ -21,7 +21,7 @@ finetune:
 多任务预训练/微调命令：
 ```
 python3 multitask_classifier.py --option pretrain --epochs=10 --lr=1e-3 --batch_size=64 --use_gpu
-python3 multitask_classifier.py --option finetune --epochs=5 --lr=1e-5 --batch_size=32 --use_gpu
+python3 multitask_classifier.py --option finetune --epochs=3 --lr=1e-5 --batch_size=64 --use_gpu
 ```
 - sst train set size = 8545
 - para train set size = 141507
@@ -32,3 +32,9 @@ python3 multitask_classifier.py --option finetune --epochs=5 --lr=1e-5 --batch_s
 - dev paraphrase acc : 0.375
 - dev sts corr : 0.260
 - average performance: 0.472
+
+微调结果 (10 epochs)：
+- dev sentiment acc : 0.465
+- dev paraphrase acc : 0.435
+- dev sts corr : 0.365
+- average performance: 0.538

@@ -208,10 +208,13 @@ def train_multitask(args):
               'option': args.option}
 
     config = SimpleNamespace(**config)
-
     model = MultitaskBERT(config)
-    model = model.to(device)
 
+    # pretrained_dict = torch.load('pretrain-10-0.001-multitask.pt', map_location=device)
+    # model_weights = pretrained_dict['model']  # 提取模型权重
+    # model.load_state_dict(model_weights)
+    model = model.to(device)
+    
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_performance = 0
