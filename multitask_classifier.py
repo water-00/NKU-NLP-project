@@ -67,7 +67,7 @@ class MultitaskBERT(nn.Module):
             nn.Sigmoid() # [0, 1]，输出同义的概率，再计算cross-entropy
         )
         self.similarity_classifier = nn.Sequential(
-            nn.Linear(3 * config.hidden_size, 64),
+            nn.Linear(2 * config.hidden_size + 1, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid(),
@@ -330,7 +330,6 @@ def test_model(args):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    # parser.add_argument("--task_type", type=str, default="sst")
     
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
     parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
@@ -367,15 +366,23 @@ def get_args():
                         default=1e-5)
 
     parser.add_argument("--test", action='store_true', help="If set, skip the training process")
+    parser.add_argument("--small", action='store_true', help="If set, use the small dataset")
+
 
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
-    print(args.filepath)
     seed_everything(args.seed)  # fix the seed for reproducibility
     if not args.test:
+        if args.small:
+            args.sst_train = "data/ids-sst-train-small.csv"
+            args.para_train = "data/quora-train-small.csv"
+            args.sts_train = "data/sts-train-small.csv"
+            args.filepath = f'{args.option}-{args.epochs}-{args.lr}-small-multitask.pt' # save path
+        else:
+            args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
+
         train_multitask(args)
     test_model(args)

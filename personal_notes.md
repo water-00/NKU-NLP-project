@@ -31,19 +31,30 @@ python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_
 - para train set size = 141507
 - sts train set size = 6041
 
-预训练结果：
-- dev sentiment acc : 0.411
-- dev paraphrase acc : 0.375
-- dev sts corr : 0.260
+全训练集预训练结果：
+- dev sentiment acc: 0.411
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.260
 - average performance: 0.349
 
-微调结果 (10 epochs)：
-- dev sentiment acc : 0.480
-- dev paraphrase acc : 0.375
-- dev sts corr : 0.405
+全训练集微调结果 (10 epochs)：
+- dev sentiment acc: 0.480
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.405
 - average performance: 0.420
 
+一般情况下请使用小训练集（添加`--small`参数）
+```
+python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_size=32 --use_gpu --small
+```
+naive:
+- dev sentiment acc: 0.455
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.359
+- average performance: 0.397
 ## 参考结果
+
+with absolute difference and cosine similarity: 
 
 report：Walk Less and Only Down Smooth Valleys
 
