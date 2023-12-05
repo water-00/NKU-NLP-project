@@ -61,20 +61,13 @@ class MultitaskBERT(nn.Module):
             nn.Linear(64, N_SENTIMENT_CLASSES) # [0, 1]^5，输出属于每个类别的概率，再计算cross-entropy
         )
         self.paraphrase_classifier = nn.Sequential(
-            nn.Linear(2 * config.hidden_size, 64),
+            nn.Linear(3 * config.hidden_size, 64),
             nn.ReLU(),
             nn.Linear(64, 1),  
             nn.Sigmoid() # [0, 1]，输出同义的概率，再计算cross-entropy
         )
-        # self.similarity_classifier = nn.Sequential(
-        #     nn.Linear(config.hidden_size, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        #     nn.Sigmoid(),
-        #     nn.Lambda(lambda x: x * 5)  # [0, 1]->[0, 5]，得到相似度计算loss
-        # )
         self.similarity_classifier = nn.Sequential(
-            nn.Linear(2 * config.hidden_size, 64),
+            nn.Linear(3 * config.hidden_size, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid(),
@@ -133,7 +126,10 @@ class MultitaskBERT(nn.Module):
         outputs_2 = self.bert(input_ids=input_ids_2, attention_mask=attention_mask_2)
         sequence_output_2 = outputs_2['pooler_output']
 
-        combined_output = torch.cat((sequence_output_1, sequence_output_2), dim=1) # dim=0是batch_size维度
+        # 计算两个嵌入向量的绝对差异，from SBERT
+        absolute_diff = torch.abs(sequence_output_1 - sequence_output_2)
+
+        combined_output = torch.cat((sequence_output_1, sequence_output_2, absolute_diff), dim=1) # dim=0是batch_size维度
         paraphrase_logits = self.paraphrase_classifier(combined_output)
         return paraphrase_logits
 
@@ -150,7 +146,10 @@ class MultitaskBERT(nn.Module):
         outputs_2 = self.bert(input_ids=input_ids_2, attention_mask=attention_mask_2)
         sequence_output_2 = outputs_2['pooler_output']
 
-        combined_output = torch.cat((sequence_output_1, sequence_output_2), dim=1)
+        # 余弦相似度，from SBERT
+        cos_sim = F.cosine_similarity(sequence_output_1, sequence_output_2, dim=1).unsqueeze(-1)
+
+        combined_output = torch.cat((sequence_output_1, sequence_output_2, cos_sim), dim=1)
         similarity_logits = self.similarity_classifier(combined_output)
         return similarity_logits
 
@@ -210,9 +209,7 @@ def train_multitask(args):
     config = SimpleNamespace(**config)
     model = MultitaskBERT(config)
 
-    # pretrained_dict = torch.load('pretrain-10-0.001-multitask.pt', map_location=device)
-    # model_weights = pretrained_dict['model']  # 提取模型权重
-    # model.load_state_dict(model_weights)
+
     model = model.to(device)
     
     lr = args.lr
@@ -224,25 +221,6 @@ def train_multitask(args):
     for epoch in range(args.epochs):
         model.train()
         sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
-        num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
-            
-            optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-            loss.backward()
-            optimizer.step()
-
-            sst_train_loss += loss.item()
-            num_batches += 1
-            # print(f'sst: batch = {num_batches}')
-
-        sst_train_loss = sst_train_loss / (num_batches)
         
         num_batches = 0
         for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
@@ -268,9 +246,27 @@ def train_multitask(args):
 
             para_train_loss += loss.item()
             num_batches += 1
-            # print(f'para: batch = {num_batches}')
             
         para_train_loss = para_train_loss / (num_batches)
+
+        num_batches = 0
+        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            b_ids, b_mask, b_labels = (batch['token_ids'],
+                                       batch['attention_mask'], batch['labels'])
+            b_ids = b_ids.to(device)
+            b_mask = b_mask.to(device)
+            b_labels = b_labels.to(device)
+            
+            optimizer.zero_grad()
+            logits = model.predict_sentiment(b_ids, b_mask)
+            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+            loss.backward()
+            optimizer.step()
+
+            sst_train_loss += loss.item()
+            num_batches += 1
+
+        sst_train_loss = sst_train_loss / (num_batches)
         
         num_batches = 0
         for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
@@ -296,7 +292,6 @@ def train_multitask(args):
 
             sts_train_loss += loss.item()
             num_batches += 1
-            # print(f'sts: batch = {num_batches}')
             
         sts_train_loss = sts_train_loss / (num_batches)
         
@@ -310,7 +305,7 @@ def train_multitask(args):
                                                                 sts_dev_dataloader, 
                                                                 model, device)
 
-        average_performance = (paraphrase_accuracy + sentiment_accuracy + (sts_corr + 1) / 2) / 3 # 平均评估指标，TODO：找找更好的评估指标
+        average_performance = (paraphrase_accuracy + sentiment_accuracy + sts_corr)  / 3 # 平均评估指标，TODO：找找更好的评估指标
         if average_performance > best_performance:
             best_performance = average_performance
             save_model(model, optimizer, args, config, args.filepath)
@@ -371,12 +366,16 @@ def get_args():
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-5)
 
+    parser.add_argument("--test", action='store_true', help="If set, skip the training process")
+
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.option}-{args.epochs}-{args.lr}-multitask.pt' # save path
+    print(args.filepath)
     seed_everything(args.seed)  # fix the seed for reproducibility
-    train_multitask(args)
+    if not args.test:
+        train_multitask(args)
     test_model(args)
