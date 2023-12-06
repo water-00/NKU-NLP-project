@@ -47,15 +47,19 @@ python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_
 ```
 python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_size=32 --use_gpu --small
 ```
-naive:
+small-naive:
 - dev sentiment acc: 0.455
 - dev paraphrase acc: 0.375
 - dev sts corr: 0.359
 - average performance: 0.397
+
+small-with absolute difference and cosine similarity: 
+- dev sentiment acc: 0.450
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.365
+- average performance: 0.397
+
 ## 参考结果
-
-with absolute difference and cosine similarity: 
-
 report：Walk Less and Only Down Smooth Valleys
 
 前三列是用三种方法在三个数据集上单独学习的，中间两列是小规模数据集（每个数据集等batch-size）上的带有/不带有smart正则化算法的轮询，后三列是在完整数据集上的结果，使用预训练（pre）、不同batch-size（rrobin-full）、paraphrase和STS的共享层（rlayer）、smart正则化
