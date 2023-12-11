@@ -162,3 +162,5 @@ cython_debug/
 *.pt
 script*
 *.pdf
+/good-project-reports
+/to-be-read
