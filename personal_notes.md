@@ -43,10 +43,15 @@ python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_
 - dev sts corr: 0.405
 - average performance: 0.420
 
-一般情况下请使用小训练集（添加`--small`参数）
+一般情况下请使用小训练集（添加`--small`参数）：
 ```
 python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_size=32 --use_gpu --small
 ```
+添加`round-robin`参数：
+```
+python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_size=32 --use_gpu --small --rrobin
+```
+
 small-naive:
 - dev sentiment acc: 0.455
 - dev paraphrase acc: 0.375
@@ -58,6 +63,12 @@ small-with absolute difference and cosine similarity:
 - dev paraphrase acc: 0.375
 - dev sts corr: 0.365
 - average performance: 0.397
+
+small-rrobin:
+- dev sentiment acc: 0.454
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.388
+- average performance: 0.406
 
 ## 参考结果
 report：Walk Less and Only Down Smooth Valleys

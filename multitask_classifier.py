@@ -216,102 +216,218 @@ def train_multitask(args):
     optimizer = AdamW(model.parameters(), lr=lr)
     best_performance = 0
     
+    if (args.rrobin):
+        # training with round-robin
+        # 在每个epoch的开始，创建迭代器
+        para_iter = iter(para_train_dataloader)
+        sst_iter = iter(sst_train_dataloader)
+        sts_iter = iter(sts_train_dataloader)
 
-    # Run for the specified number of epochs
-    for epoch in range(args.epochs):
-        model.train()
-        sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
+        for epoch in range(args.epochs):
+            model.train()
+            sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
+            total_batches = 0
+
+            while total_batches < max(len(para_train_dataloader), len(sst_train_dataloader), len(sts_train_dataloader)):
+                # 轮询训练每个任务
+                for task_iter in [para_iter, sst_iter, sts_iter]:
+                    try:
+                        batch = next(task_iter)
+                    except StopIteration:
+                        # 重置迭代器
+                        if task_iter == para_iter:
+                            para_iter = iter(para_train_dataloader)
+                        elif task_iter == sst_iter:
+                            sst_iter = iter(sst_train_dataloader)
+                        else:
+                            sts_iter = iter(sts_train_dataloader)
+                        continue  # 跳到下一个迭代器
+
+                    # 根据任务类型执行训练步骤
+                    if task_iter == para_iter:
+                        (b_ids1, b_mask1,
+                        b_ids2, b_mask2,
+                        b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                                    batch['token_ids_2'], batch['attention_mask_2'],
+                                    batch['sent_ids'], batch['labels'])
+
+                        b_ids1 = b_ids1.to(device)
+                        b_mask1 = b_mask1.to(device)
+                        b_ids2 = b_ids2.to(device)
+                        b_mask2 = b_mask2.to(device)
+                        b_labels = b_labels.to(device)
+                        
+                        optimizer.zero_grad()
+                        logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+                        logits = logits.type(torch.FloatTensor)
+                        b_labels = b_labels.type(torch.FloatTensor)
+                        loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
+                        loss.backward()
+                        optimizer.step()
+                        
+                        print(f"Epoch {epoch}, Batch {total_batches}, Task: Para, Loss: {loss.item()}")
+                        para_train_loss += loss.item()
+
+                    elif task_iter == sst_iter:
+                        b_ids, b_mask, b_labels = (batch['token_ids'],
+                        batch['attention_mask'], batch['labels'])
+                        b_ids = b_ids.to(device)
+                        b_mask = b_mask.to(device)
+                        b_labels = b_labels.to(device)
+                        
+                        optimizer.zero_grad()
+                        logits = model.predict_sentiment(b_ids, b_mask)
+                        loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+                        loss.backward()
+                        optimizer.step()
+
+                        print(f"Epoch {epoch}, Batch {total_batches}, Task: SST, Loss: {loss.item()}")
+                        sst_train_loss += loss.item()
+                    else:
+                        (b_ids1, b_mask1,
+                        b_ids2, b_mask2,
+                        b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                                    batch['token_ids_2'], batch['attention_mask_2'],
+                                    batch['sent_ids'], batch['labels'])
+
+                        b_ids1 = b_ids1.to(device)
+                        b_mask1 = b_mask1.to(device)
+                        b_ids2 = b_ids2.to(device)
+                        b_mask2 = b_mask2.to(device)
+                        b_labels = b_labels.to(device)
+                        
+                        optimizer.zero_grad()
+                        logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+                        logits = logits.type(torch.FloatTensor)
+                        b_labels = b_labels.type(torch.FloatTensor)
+                        loss = F.mse_loss(logits.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
+                        loss.backward()
+                        optimizer.step()
+                        print(f"Epoch {epoch}, Batch {total_batches}, Task: STS, Loss: {loss.item()}")
+                        sts_train_loss += loss.item()
+
+                total_batches += 1
+                
+            # 计算平均损失
+            para_train_loss = para_train_loss / len(para_train_dataloader)
+            sst_train_loss = sst_train_loss / len(sst_train_dataloader)
+            sts_train_loss = sts_train_loss / len(sts_train_dataloader)
+               
+            # 模型评估
+            (paraphrase_accuracy, para_y_pred, para_sent_ids,
+            sentiment_accuracy, sst_y_pred, sst_sent_ids,
+            sts_corr, sts_y_pred, sts_sent_ids) = model_eval_multitask(sst_dev_dataloader, 
+                                                                    para_dev_dataloader, 
+                                                                    sts_dev_dataloader, 
+                                                                    model, device)
+
+            average_performance = (paraphrase_accuracy + sentiment_accuracy + sts_corr)  / 3 # 平均评估指标，TODO：找找更好的评估指标
+            if average_performance > best_performance:
+                best_performance = average_performance
+                save_model(model, optimizer, args, config, args.filepath)
+
+            # 打印评估结果
+            print(f"Epoch {epoch}: average_performance: {average_performance:.3f}")
         
-        num_batches = 0
-        for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            (b_ids1, b_mask1,
-             b_ids2, b_mask2,
-             b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
-                          batch['token_ids_2'], batch['attention_mask_2'],
-                          batch['sent_ids'], batch['labels'])
 
-            b_ids1 = b_ids1.to(device)
-            b_mask1 = b_mask1.to(device)
-            b_ids2 = b_ids2.to(device)
-            b_mask2 = b_mask2.to(device)
-            b_labels = b_labels.to(device)
+    else:
+        # training without round-robin        
+        # Run for the specified number of epochs
+        for epoch in range(args.epochs):
+            model.train()
+            sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
             
-            optimizer.zero_grad()
-            logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-            logits = logits.type(torch.FloatTensor)
-            b_labels = b_labels.type(torch.FloatTensor)
-            loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
-            loss.backward()
-            optimizer.step()
+            num_batches = 0
+            for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1,
+                b_ids2, b_mask2,
+                b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                            batch['token_ids_2'], batch['attention_mask_2'],
+                            batch['sent_ids'], batch['labels'])
 
-            para_train_loss += loss.item()
-            num_batches += 1
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
+                
+                optimizer.zero_grad()
+                logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+                logits = logits.type(torch.FloatTensor)
+                b_labels = b_labels.type(torch.FloatTensor)
+                loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
+
+                para_train_loss += loss.item()
+                num_batches += 1
+                
+            para_train_loss = para_train_loss / (num_batches)
+
+            num_batches = 0
+            for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                b_ids, b_mask, b_labels = (batch['token_ids'],
+                                        batch['attention_mask'], batch['labels'])
+                b_ids = b_ids.to(device)
+                b_mask = b_mask.to(device)
+                b_labels = b_labels.to(device)
+                
+                optimizer.zero_grad()
+                logits = model.predict_sentiment(b_ids, b_mask)
+                loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
+
+                sst_train_loss += loss.item()
+                num_batches += 1
+
+            sst_train_loss = sst_train_loss / (num_batches)
             
-        para_train_loss = para_train_loss / (num_batches)
+            num_batches = 0
+            for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1,
+                b_ids2, b_mask2,
+                b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                            batch['token_ids_2'], batch['attention_mask_2'],
+                            batch['sent_ids'], batch['labels'])
 
-        num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
+                
+                optimizer.zero_grad()
+                logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+                logits = logits.type(torch.FloatTensor)
+                b_labels = b_labels.type(torch.FloatTensor)
+                loss = F.mse_loss(logits.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
+
+                sts_train_loss += loss.item()
+                num_batches += 1
+                
+            sts_train_loss = sts_train_loss / (num_batches)
             
-            optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-            loss.backward()
-            optimizer.step()
+            # 模型评估
+            # sts_corr: 皮尔逊相关系数，[-1, 1]
+            (paraphrase_accuracy, para_y_pred, para_sent_ids,
+            sentiment_accuracy, sst_y_pred, sst_sent_ids,
+            sts_corr, sts_y_pred, sts_sent_ids) = model_eval_multitask(sst_dev_dataloader, 
+                                                                    para_dev_dataloader, 
+                                                                    sts_dev_dataloader, 
+                                                                    model, device)
 
-            sst_train_loss += loss.item()
-            num_batches += 1
+            average_performance = (paraphrase_accuracy + sentiment_accuracy + sts_corr)  / 3 # 平均评估指标，TODO：找找更好的评估指标
+            if average_performance > best_performance:
+                best_performance = average_performance
+                save_model(model, optimizer, args, config, args.filepath)
 
-        sst_train_loss = sst_train_loss / (num_batches)
+            # 打印评估结果
+            print(f"Epoch {epoch}: average_performance: {average_performance:.3f}")
         
-        num_batches = 0
-        for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            (b_ids1, b_mask1,
-             b_ids2, b_mask2,
-             b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
-                          batch['token_ids_2'], batch['attention_mask_2'],
-                          batch['sent_ids'], batch['labels'])
 
-            b_ids1 = b_ids1.to(device)
-            b_mask1 = b_mask1.to(device)
-            b_ids2 = b_ids2.to(device)
-            b_mask2 = b_mask2.to(device)
-            b_labels = b_labels.to(device)
-            
-            optimizer.zero_grad()
-            logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-            logits = logits.type(torch.FloatTensor)
-            b_labels = b_labels.type(torch.FloatTensor)
-            loss = F.mse_loss(logits.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
-            loss.backward()
-            optimizer.step()
-
-            sts_train_loss += loss.item()
-            num_batches += 1
-            
-        sts_train_loss = sts_train_loss / (num_batches)
-        
-        
-        # 模型评估
-        # sts_corr: 皮尔逊相关系数，[-1, 1]
-        (paraphrase_accuracy, para_y_pred, para_sent_ids,
-        sentiment_accuracy, sst_y_pred, sst_sent_ids,
-        sts_corr, sts_y_pred, sts_sent_ids) = model_eval_multitask(sst_dev_dataloader, 
-                                                                para_dev_dataloader, 
-                                                                sts_dev_dataloader, 
-                                                                model, device)
-
-        average_performance = (paraphrase_accuracy + sentiment_accuracy + sts_corr)  / 3 # 平均评估指标，TODO：找找更好的评估指标
-        if average_performance > best_performance:
-            best_performance = average_performance
-            save_model(model, optimizer, args, config, args.filepath)
-
-        # 打印评估结果
-        print(f"Epoch {epoch}: average_performance: {average_performance:.3f}")
 
 
 def test_model(args):
@@ -367,6 +483,7 @@ def get_args():
 
     parser.add_argument("--test", action='store_true', help="If set, skip the training process")
     parser.add_argument("--small", action='store_true', help="If set, use the small dataset")
+    parser.add_argument("--rrobin", action='store_true')
 
 
     args = parser.parse_args()
