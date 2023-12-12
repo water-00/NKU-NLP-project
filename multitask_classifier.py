@@ -15,6 +15,8 @@ from datasets import SentenceClassificationDataset, SentencePairDataset, \
 
 from evaluation import model_eval_sst, test_model_multitask, model_eval_multitask
 
+import copy
+
 
 TQDM_DISABLE=False
 
@@ -169,6 +171,98 @@ def save_model(model, optimizer, args, config, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
+#对称kl散度
+def symmetric_kl_divergence(output, target):
+    # 将logits转换为概率分布
+    softmax_output = F.softmax(output, dim=1)
+    softmax_target = F.softmax(target, dim=1)
+
+    # 计算P对Q的KL散度
+    kl_div1 = F.kl_div(softmax_output.log(), softmax_target, reduction='batchmean')
+    # 计算Q对P的KL散度
+    kl_div2 = F.kl_div(softmax_target.log(), softmax_output, reduction='batchmean')
+    
+    # 对称KL散度是两者之和
+    skl_div = kl_div1 + kl_div2
+    return skl_div
+
+def compute_smart_regularization_kl(model, batch, epsilon, device):
+    # Save the original parameters of the model
+    orig_params = {name: param.clone() for name, param in model.named_parameters()}
+    
+    # Initialize the regularization term
+    regularization_term = 0.0
+    
+    # Iterate over all parameters and add perturbation
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            # Save the original data of the parameter
+            orig_data = param.data.clone()
+            
+            # Generate a random perturbation
+            perturbation = torch.randn_like(param) * epsilon
+            # Apply perturbation and ensure it's within the epsilon ball
+            param.data = orig_data + torch.clamp(perturbation, -epsilon, epsilon)
+    
+    # Calculate the new loss with perturbed parameters
+    perturbed_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
+    
+    # Restore the original parameters
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            param.data = orig_params[name]
+    
+    # Calculate the loss with original parameters
+    original_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
+    perturbed_loss = symmetric_kl_divergence(perturbed_outputs, original_outputs.detach())
+    original_loss = symmetric_kl_divergence(original_outputs, original_outputs.detach())
+    
+    # Calculate the maximum loss difference across all perturbations
+    max_loss_diff = torch.max(perturbed_loss - original_loss)
+    
+    # The regularization term is the average of the max loss difference
+    regularization_term = max_loss_diff / len(batch['token_ids'])
+    
+    return regularization_term
+
+def compute_smart_regularization_mse(model, batch, epsilon, device):
+    # Save the original parameters of the model
+    orig_params = {name: param.clone() for name, param in model.named_parameters()}
+    
+    # Initialize the regularization term
+    regularization_term = 0.0
+    
+    # Iterate over all parameters and add perturbation
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            # Save the original data of the parameter
+            orig_data = param.data.clone()
+            
+            # Generate a random perturbation
+            perturbation = torch.randn_like(param) * epsilon
+            # Apply perturbation and ensure it's within the epsilon ball
+            param.data = orig_data + torch.clamp(perturbation, -epsilon, epsilon)
+    
+    # Calculate the new loss with perturbed parameters
+    perturbed_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
+    perturbed_loss = F.mse_loss(perturbed_outputs, batch['labels'].to(device), reduction='sum') / batch['token_ids'].size(0)
+
+    # Restore the original parameters
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            param.data = orig_params[name]
+    
+    # Calculate the loss with original parameters
+    original_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
+    original_loss = F.mse_loss(original_outputs, batch['labels'].to(device), reduction='sum') / batch['token_ids'].size(0)
+    
+    # Calculate the maximum loss difference across all perturbations
+    max_loss_diff = torch.max(perturbed_loss - original_loss)
+    
+    # The regularization term is the average of the max loss difference
+    regularization_term = max_loss_diff / len(batch['token_ids'])
+    
+    return regularization_term
 
 ## Currently only trains on sst dataset
 def train_multitask(args):
@@ -262,27 +356,66 @@ def train_multitask(args):
                         logits = logits.type(torch.FloatTensor)
                         b_labels = b_labels.type(torch.FloatTensor)
                         loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
-                        loss.backward()
-                        optimizer.step()
-                        
-                        print(f"Epoch {epoch}, Batch {total_batches}, Task: Para, Loss: {loss.item()}")
-                        para_train_loss += loss.item()
+
+                        if args.smartr:
+                            # 计算SMART正则化项,使用对称kl散度
+                            smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            
+                            # 将正则化项加到原始损失上
+                            total_loss = loss + 5 * smart_reg
+                            total_loss.backward()
+                            optimizer.step()
+                            
+                            # 输出损失信息
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: Para, Loss: {total_loss.item()}")
+                            
+                            # 累加para任务的损失
+                            para_train_loss += total_loss.item()
+                        else:
+                            loss.backward()
+                            optimizer.step()
+                            
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: Para, Loss: {loss.item()}")
+                            para_train_loss += loss.item()
 
                     elif task_iter == sst_iter:
                         b_ids, b_mask, b_labels = (batch['token_ids'],
-                        batch['attention_mask'], batch['labels'])
+                                                batch['attention_mask'], batch['labels'])
                         b_ids = b_ids.to(device)
                         b_mask = b_mask.to(device)
                         b_labels = b_labels.to(device)
                         
                         optimizer.zero_grad()
+                        
+                        # 前向传播，计算原始损失
                         logits = model.predict_sentiment(b_ids, b_mask)
                         loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-                        loss.backward()
-                        optimizer.step()
 
-                        print(f"Epoch {epoch}, Batch {total_batches}, Task: SST, Loss: {loss.item()}")
-                        sst_train_loss += loss.item()
+                        if args.smartr:
+                            # 计算SMART正则化项,使用对称kl散度
+                            smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            
+                            # 将正则化项加到原始损失上
+                            total_loss = loss + 5 * smart_reg
+                            
+                            # 反向传播总损失
+                            total_loss.backward()
+                            optimizer.step()
+                            
+                            # 输出损失信息
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: SST, Loss: {total_loss.item()}")
+                            
+                            # 累加SST任务的损失
+                            sst_train_loss += total_loss.item()
+                        else:
+                            loss.backward()
+                            optimizer.step()
+
+                            # 输出损失信息
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: SST, Loss: {loss.item()}")
+                            
+                            # 累加SST任务的损失
+                            sst_train_loss += loss.item()
                     else:
                         (b_ids1, b_mask1,
                         b_ids2, b_mask2,
@@ -301,10 +434,28 @@ def train_multitask(args):
                         logits = logits.type(torch.FloatTensor)
                         b_labels = b_labels.type(torch.FloatTensor)
                         loss = F.mse_loss(logits.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
-                        loss.backward()
-                        optimizer.step()
-                        print(f"Epoch {epoch}, Batch {total_batches}, Task: STS, Loss: {loss.item()}")
-                        sts_train_loss += loss.item()
+
+                        if args.smartr:
+                            # 计算SMART正则化项,使用平方差损失
+                            smart_reg = compute_smart_regularization_mse(model, total_batches, epsilon=1e-5, device=device)
+
+                            # 将正则化项加到原始损失上
+                            total_loss = loss + 5 * smart_reg
+
+                            # 反向传播总损失
+                            total_loss.backward()
+                            optimizer.step()
+                            
+                            # 输出损失信息
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: STS, Loss: {total_loss.item()}")
+                            
+                            # 累加SST任务的损失
+                            sts_train_loss += total_loss.item()
+                        else:
+                            loss.backward()
+                            optimizer.step()
+                            print(f"Epoch {epoch}, Batch {total_batches}, Task: STS, Loss: {loss.item()}")
+                            sts_train_loss += loss.item()
 
                 total_batches += 1
                 
@@ -356,10 +507,22 @@ def train_multitask(args):
                 logits = logits.type(torch.FloatTensor)
                 b_labels = b_labels.type(torch.FloatTensor)
                 loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
-                loss.backward()
-                optimizer.step()
-
-                para_train_loss += loss.item()
+                if args.smartr:
+                    # 计算SMART正则化项,使用对称kl散度
+                    smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            
+                    # 将正则化项加到原始损失上
+                    total_loss = loss + 5 * smart_reg
+                    total_loss.backward()
+                    optimizer.step()
+                            
+                    # 累加para任务的损失
+                    para_train_loss += total_loss.item()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                            
+                    para_train_loss += loss.item()
                 num_batches += 1
                 
             para_train_loss = para_train_loss / (num_batches)
@@ -375,10 +538,25 @@ def train_multitask(args):
                 optimizer.zero_grad()
                 logits = model.predict_sentiment(b_ids, b_mask)
                 loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-                loss.backward()
-                optimizer.step()
-
-                sst_train_loss += loss.item()
+                if args.smartr:
+                    # 计算SMART正则化项,使用对称kl散度
+                    smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            
+                    # 将正则化项加到原始损失上
+                    total_loss = loss + 5 * smart_reg
+                            
+                    # 反向传播总损失
+                    total_loss.backward()
+                    optimizer.step()
+                            
+                    # 累加SST任务的损失
+                    sst_train_loss += total_loss.item()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                            
+                    # 累加SST任务的损失
+                    sst_train_loss += loss.item()
                 num_batches += 1
 
             sst_train_loss = sst_train_loss / (num_batches)
@@ -402,10 +580,23 @@ def train_multitask(args):
                 logits = logits.type(torch.FloatTensor)
                 b_labels = b_labels.type(torch.FloatTensor)
                 loss = F.mse_loss(logits.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
-                loss.backward()
-                optimizer.step()
+                if args.smartr:
+                    # 计算SMART正则化项,使用平方差损失
+                    smart_reg = compute_smart_regularization_mse(model, total_batches, epsilon=1e-5, device=device)
 
-                sts_train_loss += loss.item()
+                    # 将正则化项加到原始损失上
+                    total_loss = loss + 5 * smart_reg
+
+                    # 反向传播总损失
+                    total_loss.backward()
+                    optimizer.step()
+                            
+                    # 累加STS任务的损失
+                    sts_train_loss += total_loss.item()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                    sts_train_loss += loss.item()
                 num_batches += 1
                 
             sts_train_loss = sts_train_loss / (num_batches)
@@ -485,6 +676,7 @@ def get_args():
     parser.add_argument("--small", action='store_true', help="If set, use the small dataset")
     parser.add_argument("--rrobin", action='store_true')
 
+    parser.add_argument("--smartr", action='store_true')
 
     args = parser.parse_args()
     return args
