@@ -81,26 +81,7 @@ class MultitaskBERT(nn.Module):
 
     def forward(self, input_ids, attention_mask, task_type='sst'):
         'Takes a batch of sentences and produces embeddings for them.'
-        # The final BERT embedding is the hidden state of [CLS] token (the first token)
-        # Here, you can start by just returning the embeddings straight from BERT.
-        # When thinking of improvements, you can later try modifying this
-        # (e.g., by adding other layers).
-        ### TODO
-        # # 获取BERT模型的输出
-        # output_dict =  self.bert(input_ids, attention_mask)
-        # pooler_output = output_dict['pooler_output'] # CLS
-        
-        # # 根据任务类型选择分类头
-        # if task_type == 'sst':
-        #     output = self.sentiment_classifier(pooler_output)
-        # elif task_type == 'para':
-        #     output = self.paraphrase_classifier(pooler_output)
-        # elif task_type == 'sts':
-        #     output = self.similarity_classifier(pooler_output)
-        # else:
-        #     raise ValueError("Invalid task type")
 
-        # return output
 
     def predict_sentiment(self, input_ids, attention_mask):
         '''Given a batch of sentences, outputs logits for classifying sentiment.
@@ -186,12 +167,14 @@ def symmetric_kl_divergence(output, target):
     skl_div = kl_div1 + kl_div2
     return skl_div
 
-def compute_smart_regularization_kl(model, batch, epsilon, device):
+def compute_smart_regularization_kl(model, batch, epsilon, device, predict_function, task_type):
+    # for para or sst
     # Save the original parameters of the model
     orig_params = {name: param.clone() for name, param in model.named_parameters()}
     
     # Initialize the regularization term
     regularization_term = 0.0
+    
     
     # Iterate over all parameters and add perturbation
     for name, param in model.named_parameters():
@@ -204,8 +187,31 @@ def compute_smart_regularization_kl(model, batch, epsilon, device):
             # Apply perturbation and ensure it's within the epsilon ball
             param.data = orig_data + torch.clamp(perturbation, -epsilon, epsilon)
     
+    if (task_type == "sst"):
+        b_ids, b_mask, b_labels = (batch['token_ids'],
+                        batch['attention_mask'], batch['labels'])
+        b_ids = b_ids.to(device)
+        b_mask = b_mask.to(device)
+        b_labels = b_labels.to(device)
+        
+        perturbed_outputs = model.predict_sentiment(b_ids, b_mask)
+        
+    elif (task_type == "para"):
+        (b_ids1, b_mask1,
+        b_ids2, b_mask2,
+        b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                    batch['token_ids_2'], batch['attention_mask_2'],
+                    batch['sent_ids'], batch['labels'])
+
+        b_ids1 = b_ids1.to(device)
+        b_mask1 = b_mask1.to(device)
+        b_ids2 = b_ids2.to(device)
+        b_mask2 = b_mask2.to(device)
+        b_labels = b_labels.to(device)
+        
+        perturbed_outputs = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+
     # Calculate the new loss with perturbed parameters
-    perturbed_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
     
     # Restore the original parameters
     for name, param in model.named_parameters():
@@ -213,7 +219,11 @@ def compute_smart_regularization_kl(model, batch, epsilon, device):
             param.data = orig_params[name]
     
     # Calculate the loss with original parameters
-    original_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
+    if (task_type == "sst"):
+        original_outputs = model.predict_sentiment(b_ids, b_mask)
+    elif (task_type == "para"):
+        original_outputs = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+
     perturbed_loss = symmetric_kl_divergence(perturbed_outputs, original_outputs.detach())
     original_loss = symmetric_kl_divergence(original_outputs, original_outputs.detach())
     
@@ -221,11 +231,24 @@ def compute_smart_regularization_kl(model, batch, epsilon, device):
     max_loss_diff = torch.max(perturbed_loss - original_loss)
     
     # The regularization term is the average of the max loss difference
-    regularization_term = max_loss_diff / len(batch['token_ids'])
+    regularization_term = max_loss_diff / args.batch_size
     
     return regularization_term
 
 def compute_smart_regularization_mse(model, batch, epsilon, device):
+    # only for sts
+    (b_ids1, b_mask1,
+    b_ids2, b_mask2,
+    b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                batch['token_ids_2'], batch['attention_mask_2'],
+                batch['sent_ids'], batch['labels'])
+    
+    b_ids1 = b_ids1.to(device)
+    b_mask1 = b_mask1.to(device)
+    b_ids2 = b_ids2.to(device)
+    b_mask2 = b_mask2.to(device)
+    b_labels = b_labels.to(device)
+    
     # Save the original parameters of the model
     orig_params = {name: param.clone() for name, param in model.named_parameters()}
     
@@ -244,8 +267,8 @@ def compute_smart_regularization_mse(model, batch, epsilon, device):
             param.data = orig_data + torch.clamp(perturbation, -epsilon, epsilon)
     
     # Calculate the new loss with perturbed parameters
-    perturbed_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
-    perturbed_loss = F.mse_loss(perturbed_outputs, batch['labels'].to(device), reduction='sum') / batch['token_ids'].size(0)
+    perturbed_outputs = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+    perturbed_loss = F.mse_loss(perturbed_outputs.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
 
     # Restore the original parameters
     for name, param in model.named_parameters():
@@ -253,14 +276,14 @@ def compute_smart_regularization_mse(model, batch, epsilon, device):
             param.data = orig_params[name]
     
     # Calculate the loss with original parameters
-    original_outputs = model(batch['token_ids'].to(device), batch['attention_mask'].to(device))
-    original_loss = F.mse_loss(original_outputs, batch['labels'].to(device), reduction='sum') / batch['token_ids'].size(0)
+    original_outputs = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+    original_loss = F.mse_loss(original_outputs.squeeze(), b_labels.float(), reduction='sum') / args.batch_size
     
     # Calculate the maximum loss difference across all perturbations
     max_loss_diff = torch.max(perturbed_loss - original_loss)
     
     # The regularization term is the average of the max loss difference
-    regularization_term = max_loss_diff / len(batch['token_ids'])
+    regularization_term = max_loss_diff / args.batch_size
     
     return regularization_term
 
@@ -359,7 +382,7 @@ def train_multitask(args):
 
                         if args.smartr:
                             # 计算SMART正则化项,使用对称kl散度
-                            smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            smart_reg = compute_smart_regularization_kl(model, batch, epsilon=1e-5, device=device, predict_function=model.predict_paraphrase, task_type="para")
                             
                             # 将正则化项加到原始损失上
                             total_loss = loss + 5 * smart_reg
@@ -393,7 +416,7 @@ def train_multitask(args):
 
                         if args.smartr:
                             # 计算SMART正则化项,使用对称kl散度
-                            smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                            smart_reg = compute_smart_regularization_kl(model, batch, epsilon=1e-5, device=device, predict_function=model.predict_sentiment, task_type="sst")
                             
                             # 将正则化项加到原始损失上
                             total_loss = loss + 5 * smart_reg
@@ -437,7 +460,7 @@ def train_multitask(args):
 
                         if args.smartr:
                             # 计算SMART正则化项,使用平方差损失
-                            smart_reg = compute_smart_regularization_mse(model, total_batches, epsilon=1e-5, device=device)
+                            smart_reg = compute_smart_regularization_mse(model, batch, epsilon=1e-5, device=device)
 
                             # 将正则化项加到原始损失上
                             total_loss = loss + 5 * smart_reg
@@ -509,7 +532,7 @@ def train_multitask(args):
                 loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
                 if args.smartr:
                     # 计算SMART正则化项,使用对称kl散度
-                    smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                    smart_reg = compute_smart_regularization_kl(model, batch, epsilon=1e-5, device=device, predict_function=model.predict_paraphrase, task_type="para")
                             
                     # 将正则化项加到原始损失上
                     total_loss = loss + 5 * smart_reg
@@ -540,7 +563,7 @@ def train_multitask(args):
                 loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
                 if args.smartr:
                     # 计算SMART正则化项,使用对称kl散度
-                    smart_reg = compute_smart_regularization_kl(model, total_batches, epsilon=1e-5, device=device)
+                    smart_reg = compute_smart_regularization_kl(model, batch, epsilon=1e-5, device=device, predict_function=model.predict_sentiment, task_type="sst")
                             
                     # 将正则化项加到原始损失上
                     total_loss = loss + 5 * smart_reg
