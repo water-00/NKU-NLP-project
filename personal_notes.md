@@ -58,7 +58,7 @@ small-naive:
 - dev sts corr: 0.359
 - average performance: 0.397
 
-small-with absolute difference and cosine similarity: 
+small-with absolute difference and cosine similarity(之后的small都带有这个): 
 - dev sentiment acc: 0.450
 - dev paraphrase acc: 0.375
 - dev sts corr: 0.365
@@ -70,6 +70,11 @@ small-rrobin:
 - dev sts corr: 0.388
 - average performance: 0.406
 
+small-rrobin-smart
+- dev sentiment acc: 0.457
+- dev paraphrase acc: 0.375
+- dev sts corr: 0.445
+- average performance: 0.426
 ## 参考结果
 report：Walk Less and Only Down Smooth Valleys
 

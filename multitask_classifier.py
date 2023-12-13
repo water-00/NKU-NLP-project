@@ -307,6 +307,7 @@ def train_multitask(args):
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
+    
     para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
                                       collate_fn=para_train_data.collate_fn)
     para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size,
@@ -315,7 +316,7 @@ def train_multitask(args):
                                       collate_fn=sts_train_data.collate_fn)
     sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
                                       collate_fn=sts_dev_data.collate_fn)
-
+    
     # Init model
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
               'num_labels': num_labels,
@@ -325,13 +326,12 @@ def train_multitask(args):
 
     config = SimpleNamespace(**config)
     model = MultitaskBERT(config)
-
-
     model = model.to(device)
     
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
     best_performance = 0
+
     
     if (args.rrobin):
         # training with round-robin
@@ -341,9 +341,65 @@ def train_multitask(args):
         sts_iter = iter(sts_train_dataloader)
 
         for epoch in range(args.epochs):
+            
             model.train()
+            if (args.pre):
+                if (args.small):
+                    raise Exception("args.small cann't be True when using args.pre")  # 当args.full为True时抛出异常
+                
+                para_train_loss = 0
+                args.para_train = "data/quora-train-pre.csv"
+                _, _,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+                para_train_data = SentencePairDataset(para_train_data, args, 'para')
+                para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                                            collate_fn=para_train_data.collate_fn)
+
+                for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                    (b_ids1, b_mask1,
+                    b_ids2, b_mask2,
+                    b_sent_ids, b_labels) = (batch['token_ids_1'], batch['attention_mask_1'],
+                                batch['token_ids_2'], batch['attention_mask_2'],
+                                batch['sent_ids'], batch['labels'])
+
+                    b_ids1 = b_ids1.to(device)
+                    b_mask1 = b_mask1.to(device)
+                    b_ids2 = b_ids2.to(device)
+                    b_mask2 = b_mask2.to(device)
+                    b_labels = b_labels.to(device)
+                    
+                    optimizer.zero_grad()
+                    logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+                    logits = logits.type(torch.FloatTensor)
+                    b_labels = b_labels.type(torch.FloatTensor)
+                    loss = F.binary_cross_entropy(logits.squeeze(), b_labels.view(-1), reduction='sum') / args.batch_size
+                    if args.smartr:
+                        # 计算SMART正则化项,使用对称kl散度
+                        smart_reg = compute_smart_regularization_kl(model, batch, epsilon=1e-5, device=device, predict_function=model.predict_paraphrase, task_type="para")
+                                
+                        # 将正则化项加到原始损失上
+                        total_loss = loss + 5 * smart_reg
+                        total_loss.backward()
+                        optimizer.step()
+                                
+                        # 累加para任务的损失
+                        para_train_loss += total_loss.item()
+                    else:
+                        loss.backward()
+                        optimizer.step()
+                                
+                        para_train_loss += loss.item()
+
+
             sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
             total_batches = 0
+
+
+            args.para_train = "data/quora-train-pre-left.csv"
+            _, _,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+            para_train_data = SentencePairDataset(para_train_data, args, 'para')
+            para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                                        collate_fn=para_train_data.collate_fn)
+
 
             while total_batches < max(len(para_train_dataloader), len(sst_train_dataloader), len(sts_train_dataloader)):
                 # 轮询训练每个任务
@@ -695,11 +751,13 @@ def get_args():
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-5)
 
-    parser.add_argument("--test", action='store_true', help="If set, skip the training process")
-    parser.add_argument("--small", action='store_true', help="If set, use the small dataset")
-    parser.add_argument("--rrobin", action='store_true')
-
-    parser.add_argument("--smartr", action='store_true')
+    parser.add_argument("--test", action='store_true') # 仅测试
+    parser.add_argument("--small", action='store_true') # 使用小规模数据集
+    parser.add_argument("--rrobin", action='store_true') # 训练时对数据集使用round-robin方法
+    parser.add_argument("--smartr", action='store_true') # 使用smart正则化
+    parser.add_argument("--full", action='store_true') # 使用完整数据集训练
+    parser.add_argument("--pre", action='store_true') # 使用para的数据先进行warm-up,仅在完整数据集下生效
+    parser.add_argument("--rlayer", action='store_true') # 添加relational layer
 
     args = parser.parse_args()
     return args
@@ -708,7 +766,7 @@ if __name__ == "__main__":
     args = get_args()
     seed_everything(args.seed)  # fix the seed for reproducibility
     if not args.test:
-        if args.small:
+        if args.small and (not args.full):
             args.sst_train = "data/ids-sst-train-small.csv"
             args.para_train = "data/quora-train-small.csv"
             args.sts_train = "data/sts-train-small.csv"
