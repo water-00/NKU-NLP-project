@@ -37,6 +37,19 @@ N_SENTIMENT_CLASSES = 5
 # N_PARAPHRASE_CLASSES = 2
 # N_SIMILARITY_CLASSES = 5
 
+class RelationalLayer(nn.Module):
+    def __init__(self, hidden_size):
+        super(RelationalLayer, self).__init__()
+        self.transformation = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(hidden_size, hidden_size)
+        )
+
+    def forward(self, x):
+        # x: 来自BERT的特征表示
+        return self.transformation(x)
+
 class MultitaskBERT(nn.Module):
     '''
     This module should use BERT for 3 tasks:
@@ -50,6 +63,7 @@ class MultitaskBERT(nn.Module):
         # You will want to add layers here to perform the downstream tasks.
         # Pretrain mode does not require updating bert paramters.
         self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.relational_layer = RelationalLayer(config.hidden_size) # for rlayer
         for param in self.bert.parameters():
             if config.option == 'pretrain':
                 param.requires_grad = False
@@ -104,15 +118,19 @@ class MultitaskBERT(nn.Module):
         '''
         ### TODO
         outputs_1 = self.bert(input_ids=input_ids_1, attention_mask=attention_mask_1)
-        sequence_output_1 = outputs_1['pooler_output']
-
         outputs_2 = self.bert(input_ids=input_ids_2, attention_mask=attention_mask_2)
+        sequence_output_1 = outputs_1['pooler_output']
         sequence_output_2 = outputs_2['pooler_output']
-
-        # 计算两个嵌入向量的绝对差异，from SBERT
-        absolute_diff = torch.abs(sequence_output_1 - sequence_output_2)
-
-        combined_output = torch.cat((sequence_output_1, sequence_output_2, absolute_diff), dim=1) # dim=0是batch_size维度
+        if (args.rlayer):
+            relational_output_1 = self.relational_layer(sequence_output_1)
+            relational_output_2 = self.relational_layer(sequence_output_2)
+            absolute_diff = torch.abs(relational_output_1 - relational_output_2)
+            combined_output = torch.cat((relational_output_1, relational_output_2, absolute_diff), dim=1)
+        else:
+            # 计算两个嵌入向量的绝对差异，from SBERT
+            absolute_diff = torch.abs(sequence_output_1 - sequence_output_2)
+            combined_output = torch.cat((sequence_output_1, sequence_output_2, absolute_diff), dim=1) # dim=0是batch_size维度
+            
         paraphrase_logits = self.paraphrase_classifier(combined_output)
         return paraphrase_logits
 
@@ -124,15 +142,17 @@ class MultitaskBERT(nn.Module):
         '''
         ### TODO
         outputs_1 = self.bert(input_ids=input_ids_1, attention_mask=attention_mask_1)
-        sequence_output_1 = outputs_1['pooler_output']
-
         outputs_2 = self.bert(input_ids=input_ids_2, attention_mask=attention_mask_2)
+        sequence_output_1 = outputs_1['pooler_output']
         sequence_output_2 = outputs_2['pooler_output']
-
         # 余弦相似度，from SBERT
         cos_sim = F.cosine_similarity(sequence_output_1, sequence_output_2, dim=1).unsqueeze(-1)
-
-        combined_output = torch.cat((sequence_output_1, sequence_output_2, cos_sim), dim=1)
+        if (args.rlayer):
+            relational_output_1 = self.relational_layer(sequence_output_1)
+            relational_output_2 = self.relational_layer(sequence_output_2)
+            combined_output = torch.cat((relational_output_1, relational_output_2, cos_sim), dim=1)
+        else:
+            combined_output = torch.cat((sequence_output_1, sequence_output_2, cos_sim), dim=1)
         similarity_logits = self.similarity_classifier(combined_output)
         return similarity_logits
 
@@ -302,17 +322,34 @@ def train_multitask(args):
     sts_train_data = SentencePairDataset(sts_train_data, args, 'sts')
     sts_dev_data = SentencePairDataset(sts_dev_data, args, 'sts')
 
-
     sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sst_train_data.collate_fn)
+    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=para_train_data.collate_fn)
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
+                                      collate_fn=sts_train_data.collate_fn)
+    
+
+
+    if (args.rrobin):
+        # for round-robin，需要根据数据集大小重新划分一下每个训练集的batch_size
+        smallest_dataset_length = min(len(para_train_dataloader), len(sst_train_dataloader), len(sts_train_dataloader))
+        smallest_batch_num = smallest_dataset_length / args.batch_size
+        sst_batch_size = round(len(sst_train_dataloader) / smallest_dataset_length * smallest_batch_num)
+        para_batch_size = round(len(para_train_dataloader) / smallest_dataset_length * smallest_batch_num)
+        sts_batch_size = round(len(sts_train_dataloader) / smallest_dataset_length * smallest_batch_num)
+    else:
+        sst_batch_size, para_batch_size, sts_batch_size = args.batch_size, args.batch_size, args.batch_size
+
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=sst_batch_size,
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
-    
-    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=para_batch_size,
                                       collate_fn=para_train_data.collate_fn)
     para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size,
                                       collate_fn=para_dev_data.collate_fn)
-    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=sts_batch_size,
                                       collate_fn=sts_train_data.collate_fn)
     sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
                                       collate_fn=sts_dev_data.collate_fn)
@@ -341,17 +378,16 @@ def train_multitask(args):
         sts_iter = iter(sts_train_dataloader)
 
         for epoch in range(args.epochs):
-            
             model.train()
             if (args.pre):
                 if (args.small):
-                    raise Exception("args.small cann't be True when using args.pre")  # 当args.full为True时抛出异常
+                    raise Exception("args.small cann't be True when using args.pre")
                 
                 para_train_loss = 0
                 args.para_train = "data/quora-train-pre.csv"
                 _, _,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
                 para_train_data = SentencePairDataset(para_train_data, args, 'para')
-                para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=para_batch_size,
                                             collate_fn=para_train_data.collate_fn)
 
                 for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
@@ -389,17 +425,16 @@ def train_multitask(args):
                                 
                         para_train_loss += loss.item()
 
+                args.para_train = "data/quora-train-pre-left.csv"
+                _, _,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
+                para_train_data = SentencePairDataset(para_train_data, args, 'para')
+                para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=para_batch_size,
+                                            collate_fn=para_train_data.collate_fn)
+            
+
 
             sst_train_loss, para_train_loss, sts_train_loss = 0, 0, 0
             total_batches = 0
-
-
-            args.para_train = "data/quora-train-pre-left.csv"
-            _, _,para_train_data, _ = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-            para_train_data = SentencePairDataset(para_train_data, args, 'para')
-            para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
-                                        collate_fn=para_train_data.collate_fn)
-
 
             while total_batches < max(len(para_train_dataloader), len(sst_train_dataloader), len(sts_train_dataloader)):
                 # 轮询训练每个任务
@@ -755,7 +790,6 @@ def get_args():
     parser.add_argument("--small", action='store_true') # 使用小规模数据集
     parser.add_argument("--rrobin", action='store_true') # 训练时对数据集使用round-robin方法
     parser.add_argument("--smartr", action='store_true') # 使用smart正则化
-    parser.add_argument("--full", action='store_true') # 使用完整数据集训练
     parser.add_argument("--pre", action='store_true') # 使用para的数据先进行warm-up,仅在完整数据集下生效
     parser.add_argument("--rlayer", action='store_true') # 添加relational layer
 
@@ -766,7 +800,7 @@ if __name__ == "__main__":
     args = get_args()
     seed_everything(args.seed)  # fix the seed for reproducibility
     if not args.test:
-        if args.small and (not args.full):
+        if args.small:
             args.sst_train = "data/ids-sst-train-small.csv"
             args.para_train = "data/quora-train-small.csv"
             args.sts_train = "data/sts-train-small.csv"

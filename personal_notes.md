@@ -52,6 +52,14 @@ python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_
 python3 multitask_classifier.py --option finetune --epochs=10 --lr=1e-5 --batch_size=32 --use_gpu --small --rrobin
 ```
 
+参数使用说明：
+- `--test`：仅测试
+- `--small`：使用小数据集
+- `--rrobin`：使用round-robin算法分配batch_size
+- `--smartr`：计算损失函数时使用smart正则化
+- `--pre`：在不使用小数据集的情况下使用较大的paraphrase数据集进行预训练
+- `--rlayer`：在para和sts之间引入共享层，relational layer
+
 small-naive:
 - dev sentiment acc: 0.455
 - dev paraphrase acc: 0.375
