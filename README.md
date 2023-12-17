@@ -1,3 +1,5 @@
+关于运行项目代码的一些说明可以在`personal_notes.md`中找到。
+
 # CS 224N Default Final Project - Multitask BERT
 
 This is the starting code for the default final project for the Stanford CS 224N class. You can find the handout [here](https://web.stanford.edu/class/cs224n/project/default-final-project-bert-handout.pdf)
